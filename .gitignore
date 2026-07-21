@@ -1,0 +1,45 @@
+# === 密钥：永不入库（务必保持） ===
+.env
+*.env
+!.env.example
+config.json
+download_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.venv/
+venv/
+ENV/
+
+# uv
+# uv.lock 需要入库（保证可复现），不要忽略
+
+# 数据产物与日志
+output*/
+logs/
+*.log
+
+# 测试 / 评估
+.pytest_cache/
+.coverage
+htmlcov/
+eval/runs/
+eval/.embed_cache/
+
+# 工具
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude / Codex
+.claude/
+.codex/

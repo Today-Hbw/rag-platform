@@ -1,0 +1,42 @@
+# rag-platform — uv workspace 根（virtual root，本身不是可安装包）
+# 4 个成员包在 packages/ 下；统一解析产出单一 uv.lock。
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+rag-core = { workspace = true }
+rag-pipeline = { workspace = true }
+rag-search = { workspace = true }
+rag-mcp = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+    "pytest-asyncio",
+    "ruff",
+    "mypy",
+    "respx",
+    "fakeredis",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["packages/*/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["packages"]
+markers = [
+    "unit: 纯函数单测，无外部依赖",
+    "integration: 需要外部服务（可 mock）的集成测试",
+]
+addopts = "-ra"
