@@ -28,6 +28,7 @@ __all__ = [
     "mark_doc_fully_deleted",
     "save_resources",
     "get_resources",
+    "get_attachments_by_doc_ids",
     "delete_resources_for_docs",
     "build_manifest",
     "get_chunk_point_ids",
@@ -257,6 +258,44 @@ def get_resources(conn, doc_id, resource_type: str | None = None) -> list[dict]:
                 (doc_id,),
             )
         return list(cursor.fetchall())
+
+
+def get_attachments_by_doc_ids(conn, doc_ids: list) -> dict[int, list[dict]]:
+    """批量查多篇文档的 ok 附件，返回 ``{doc_id: [att_info]}``（检索结果富化用）。
+
+    served_url 优先用 DB 值，缺失则由 local_file 拼 ``/assets/<rel>``（data_root 即服务根）。
+    """
+    if not doc_ids:
+        return {}
+    ids = tuple(int(d) for d in doc_ids)
+    placeholders = ",".join(["%s"] * len(ids))
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT doc_id, filename, file_type, local_file, served_url, text_chars
+            FROM {TABLE_RESOURCE}
+            WHERE doc_id IN ({placeholders}) AND resource_type = 'attachment' AND status = 'ok'
+            ORDER BY res_index
+            """,
+            ids,
+        )
+        rows = cursor.fetchall()
+    result: dict[int, list[dict]] = {}
+    for row in rows:
+        local_file = row.get("local_file", "") or ""
+        served_url = row.get("served_url", "") or ""
+        if not served_url and local_file:
+            served_url = "/assets/" + local_file.replace("\\", "/").lstrip("/")
+        result.setdefault(int(row["doc_id"]), []).append(
+            {
+                "filename": row.get("filename", ""),
+                "file_type": row.get("file_type", ""),
+                "local_path": local_file,
+                "served_url": served_url,
+                "text_chars": row.get("text_chars", 0),
+            }
+        )
+    return result
 
 
 def delete_resources_for_docs(conn, doc_ids: list) -> None:
