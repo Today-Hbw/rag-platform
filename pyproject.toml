@@ -39,4 +39,4 @@ markers = [
     "unit: 纯函数单测，无外部依赖",
     "integration: 需要外部服务（可 mock）的集成测试",
 ]
-addopts = "-ra"
+addopts = "-ra --import-mode=importlib"

@@ -85,6 +85,6 @@ class SearchCache:
             return
         ttl = random.randint(self._ttl_min, self._ttl_max)
         try:
-            self._client.setex(key, ttl, json.dumps(value, ensure_ascii=False))
+            self._client.set(key, json.dumps(value, ensure_ascii=False), ex=ttl)
         except Exception as e:  # noqa: BLE001
             logger.warning("cache set error: %s", e)
