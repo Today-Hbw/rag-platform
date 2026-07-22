@@ -1,1 +1,1 @@
-GitHub贡献者只能是我自己，不要出现Claude
+GitHub贡献者只能是我自己（ben benbowenqwe@gmail.com），不要出现Claude
