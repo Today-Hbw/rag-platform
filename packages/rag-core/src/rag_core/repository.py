@@ -16,7 +16,9 @@ __all__ = [
     "TABLE_RESOURCE",
     "TABLE_CHUNK",
     "get_doc_meta",
+    "get_scope_versions",
     "upsert_doc_meta",
+    "mark_docs_deleted",
     "get_docs_to_clean",
     "get_docs_to_vectorize",
     "get_docs_to_delete",
@@ -47,6 +49,19 @@ def get_doc_meta(conn, doc_id) -> dict | None:
             (doc_id,),
         )
         return cursor.fetchone()
+
+
+def get_scope_versions(conn, source: str, collection_id) -> dict[int, str]:
+    """取某 scope 下未删文档的 ``{doc_id: source_version}``，供 detect_changes 增量判断。"""
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT doc_id, source_version FROM {TABLE_DOC_META}
+            WHERE source = %s AND collection_id = %s AND status != 'deleted'
+            """,
+            (source, str(collection_id)),
+        )
+        return {int(row["doc_id"]): (row.get("source_version") or "") for row in cursor.fetchall()}
 
 
 def upsert_doc_meta(conn, record: dict[str, Any]) -> None:
@@ -81,6 +96,29 @@ def upsert_doc_meta(conn, record: dict[str, Any]) -> None:
             """,
             record,
         )
+    conn.commit()
+
+
+def mark_docs_deleted(conn, doc_ids: list) -> None:
+    """软删除：doc_meta + chunk_record 标 status='deleted'，并清 resource 记录。
+
+    向量的物理清理留给 vectorize（读 :func:`get_docs_to_delete` → 删 Qdrant point →
+    :func:`mark_doc_fully_deleted`）。移植自旧 download_book 的删除差集处理。
+    """
+    if not doc_ids:
+        return
+    ids = tuple(int(d) for d in doc_ids)
+    placeholders = ",".join(["%s"] * len(ids))
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"UPDATE {TABLE_DOC_META} SET status = 'deleted' WHERE doc_id IN ({placeholders})",
+            ids,
+        )
+        cursor.execute(
+            f"UPDATE {TABLE_CHUNK} SET status = 'deleted' WHERE doc_id IN ({placeholders})",
+            ids,
+        )
+    delete_resources_for_docs(conn, list(ids))
     conn.commit()
 
 

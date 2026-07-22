@@ -77,6 +77,36 @@ def test_get_docs_to_delete_returns_str_ids():
     assert repo.get_docs_to_delete(conn) == ["10", "20"]
 
 
+def test_get_scope_versions_maps_doc_id_to_version():
+    conn = FakeConn([[
+        {"doc_id": 1, "source_version": "v1"},
+        {"doc_id": "2", "source_version": None},
+    ]])
+    out = repo.get_scope_versions(conn, "yuque", 42)
+    assert out == {1: "v1", 2: ""}  # doc_id 转 int，None → ""
+    sql, params = conn.cur.calls[0]
+    assert "status != 'deleted'" in sql and "collection_id" in sql
+    assert params == ("yuque", "42")  # collection_id 转 str
+
+
+def test_mark_docs_deleted_soft_marks_two_tables_and_clears_resources():
+    conn = FakeConn()
+    repo.mark_docs_deleted(conn, ["3", 4])
+    tables = [c[0] for c in conn.cur.calls]
+    assert any("UPDATE rag_doc_meta SET status = 'deleted'" in s for s in tables)
+    assert any("UPDATE rag_chunk_record SET status = 'deleted'" in s for s in tables)
+    assert any("DELETE FROM rag_resource" in s for s in tables)  # 经 delete_resources_for_docs
+    # 参数转 int
+    assert conn.cur.calls[0][1] == (3, 4)
+
+
+def test_mark_docs_deleted_empty_is_noop():
+    conn = FakeConn()
+    repo.mark_docs_deleted(conn, [])
+    assert conn.cur.calls == []
+    assert conn.commits == 0
+
+
 def test_save_resources_deletes_then_inserts_with_mapping():
     conn = FakeConn()
     resources = [{"index": 2, "url": "u", "local_path": "p.png", "mime": "image/png"}]
