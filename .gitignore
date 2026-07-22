@@ -43,3 +43,4 @@ Thumbs.db
 # Claude / Codex
 .claude/
 .codex/
+CLAUDE.md
