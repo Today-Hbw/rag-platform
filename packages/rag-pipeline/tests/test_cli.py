@@ -3,7 +3,9 @@
 import pytest
 
 from rag_pipeline import cli
+from rag_pipeline.stages.clean import CleanStats
 from rag_pipeline.stages.download import DownloadStats
+from rag_pipeline.stages.vectorize import VectorizeStats
 
 
 class _FakeConn:
@@ -88,3 +90,37 @@ def test_failed_docs_return_nonzero(monkeypatch, capsys):
     )
     rc = cli.main(["sync", "--source", "yuque"])
     assert rc == 1  # 有失败 → 非零退出
+
+
+def test_clean_subcommand(monkeypatch, capsys):
+    conn = _FakeConn()
+    monkeypatch.setattr(cli, "get_connection", lambda settings: conn)
+    captured = {}
+
+    def fake_clean(conn_, workspace, *, settings):
+        captured["data_root"] = str(workspace.data_root)
+        return CleanStats(cleaned=4, failed=0)
+
+    monkeypatch.setattr(cli.clean_stage, "clean", fake_clean)
+    rc = cli.main(["clean", "--data-root", "/tmp/dr"])
+    assert rc == 0
+    assert conn.closed is True
+    assert "清洗 4" in capsys.readouterr().out
+    assert captured["data_root"].replace("\\", "/").endswith("/tmp/dr")
+
+
+def test_vectorize_subcommand_passes_recreate(monkeypatch, capsys):
+    conn = _FakeConn()
+    monkeypatch.setattr(cli, "get_connection", lambda settings: conn)
+    captured = {}
+
+    def fake_vec(conn_, workspace, *, settings, recreate):
+        captured["recreate"] = recreate
+        return VectorizeStats(vectorized=2, chunks=7, failed=1)
+
+    monkeypatch.setattr(cli.vectorize_stage, "vectorize", fake_vec)
+    rc = cli.main(["vectorize", "--recreate"])
+    assert rc == 1  # 有失败 → 非零
+    assert captured["recreate"] is True
+    out = capsys.readouterr().out
+    assert "向量化 2" in out and "7 块" in out

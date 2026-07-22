@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from rag_pipeline.connectors.base import SourceConnector
+from rag_pipeline.connectors.local import LocalConnector
 from rag_pipeline.connectors.yuque import YuqueConnector
 
 if TYPE_CHECKING:
@@ -44,3 +45,4 @@ def available_connectors() -> list[str]:
 
 # ---- 内置注册 ----
 register_connector("yuque", YuqueConnector.from_settings)
+register_connector("local", LocalConnector.from_settings)

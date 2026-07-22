@@ -19,6 +19,7 @@ __all__ = [
     "EmbeddingSettings",
     "QdrantSettings",
     "YuqueSettings",
+    "LocalSettings",
     "SearchSettings",
     "PipelineSettings",
     "PathSettings",
@@ -70,6 +71,13 @@ class YuqueSettings(BaseModel):
     url_template: str = "https://www.yuque.com/{namespace}/{collection_slug}/{doc_key}"
 
 
+class LocalSettings(BaseModel):
+    """本地文件 connector：从目录树读 .md 作为文档源（多源抽象的验证/离线兜底）。"""
+
+    root: str = ""  # markdown 根目录
+    collection_id: str = "local"  # 该源的 collection 标识
+
+
 class SearchSettings(BaseModel):
     recall_limit: int = 100
     rrf_k: int = 20
@@ -119,6 +127,7 @@ class Settings(BaseSettings):
     embedding: EmbeddingSettings = EmbeddingSettings()
     qdrant: QdrantSettings = QdrantSettings()
     yuque: YuqueSettings = YuqueSettings()
+    local: LocalSettings = LocalSettings()
     search: SearchSettings = SearchSettings()
     pipeline: PipelineSettings = PipelineSettings()
     paths: PathSettings = PathSettings()

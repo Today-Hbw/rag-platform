@@ -1,10 +1,11 @@
-"""rag-pipeline CLI 入口。
+"""rag-pipeline CLI 入口。三个阶段子命令，可分步或串起来跑：
 
 ``rag-pipeline sync --source yuque [--scope ID ...] [--full] [--date YYYYMMDD]
-[--data-root DIR] [--dry-run]``
+[--data-root DIR] [--dry-run]``  下载
+``rag-pipeline clean [--data-root DIR]``                    清洗 downloaded→cleaned
+``rag-pipeline vectorize [--data-root DIR] [--recreate]``   向量化 cleaned→imported
 
-装配：settings → registry.get_connector(source) → db 连接 → Workspace → stages.sync。
-仅 download 阶段落地（clean/vectorize 待后续阶段）。
+装配：settings → (registry.get_connector) → db → Workspace → stages.*。
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ import sys
 from rag_core.db import get_connection
 from rag_core.settings import get_settings
 from rag_pipeline.connectors.registry import available_connectors, get_connector
+from rag_pipeline.stages import clean as clean_stage
 from rag_pipeline.stages import download
+from rag_pipeline.stages import vectorize as vectorize_stage
 from rag_pipeline.workspace import Workspace
 
 
@@ -31,7 +34,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--date", default=None, help="落盘日期目录 YYYYMMDD，缺省今天")
     p.add_argument("--data-root", default=None, help="覆盖 settings.paths.data_root")
     p.add_argument("--dry-run", action="store_true", help="只报告将抓/将删，不写盘不改 DB")
+
+    c = sub.add_parser("clean", help="清洗 downloaded → cleaned")
+    c.add_argument("--data-root", default=None, help="覆盖 settings.paths.data_root")
+
+    v = sub.add_parser("vectorize", help="向量化 cleaned → imported")
+    v.add_argument("--data-root", default=None, help="覆盖 settings.paths.data_root")
+    v.add_argument("--recreate", action="store_true", help="重建 Qdrant collection（慎用）")
     return parser
+
+
+def _workspace(args, settings) -> Workspace:
+    data_root = args.data_root or settings.paths.data_root
+    return Workspace.for_run(data_root, getattr(args, "date", None))
 
 
 def _run_sync(args) -> int:
@@ -42,8 +57,7 @@ def _run_sync(args) -> int:
         print(e, file=sys.stderr)
         return 2
 
-    data_root = args.data_root or settings.paths.data_root
-    workspace = Workspace.for_run(data_root, args.date)
+    workspace = _workspace(args, settings)
 
     conn = get_connection(settings)
     try:
@@ -82,11 +96,51 @@ def _run_sync(args) -> int:
     return 1 if total.failed else 0
 
 
+def _run_clean(args) -> int:
+    settings = get_settings()
+    workspace = _workspace(args, settings)
+    conn = get_connection(settings)
+    try:
+        stats = clean_stage.clean(conn, workspace, settings=settings)
+    finally:
+        _close(conn)
+    print(f"[clean] 清洗 {stats.cleaned}，失败 {stats.failed}")
+    return 1 if stats.failed else 0
+
+
+def _run_vectorize(args) -> int:
+    settings = get_settings()
+    workspace = _workspace(args, settings)
+    conn = get_connection(settings)
+    try:
+        stats = vectorize_stage.vectorize(
+            conn, workspace, settings=settings, recreate=args.recreate
+        )
+    finally:
+        _close(conn)
+    print(
+        f"[vectorize] 向量化 {stats.vectorized}（{stats.chunks} 块），跳过 {stats.skipped}，"
+        f"删除 {stats.deleted}，失败 {stats.failed}"
+    )
+    return 1 if stats.failed else 0
+
+
+def _close(conn) -> None:
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _build_parser().parse_args(argv)
     if args.command == "sync":
         return _run_sync(args)
+    if args.command == "clean":
+        return _run_clean(args)
+    if args.command == "vectorize":
+        return _run_vectorize(args)
     return 1
 
 
