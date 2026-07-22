@@ -4,6 +4,9 @@
 !.env.example
 config.json
 download_config.json
+# 部署侧真实 books 配置（非密钥但环境相关）不入库；示例 *.example.json 入库
+config/connectors/*.json
+!config/connectors/*.example.json
 
 # Python
 __pycache__/

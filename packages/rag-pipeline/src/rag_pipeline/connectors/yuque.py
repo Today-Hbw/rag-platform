@@ -14,9 +14,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, fields
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import requests
 
@@ -36,9 +38,12 @@ from rag_pipeline.connectors.base import (
     normalize_version,
 )
 
+if TYPE_CHECKING:
+    from rag_core.settings import Settings
+
 logger = logging.getLogger(__name__)
 
-__all__ = ["YuqueBook", "YuqueConnector"]
+__all__ = ["YuqueBook", "YuqueConnector", "load_books"]
 
 DEFAULT_API_BASE = "https://www.yuque.com/api/v2"
 # 部署侧按自己的语雀空间覆盖（如 https://<space>.yuque.com/{namespace}/{collection_slug}/{doc_key}）。
@@ -54,6 +59,26 @@ class YuqueBook:
     namespace: str = ""  # 原 team_code（正确值，可空；D5：权限不锚它）
     title: str = ""
     token: str = ""  # 可选 per-book token 覆盖全局
+
+
+def load_books(path: str | Path) -> list[YuqueBook]:
+    """从 JSON 读 books 配置（非密钥）。文件不存在返回 []。
+
+    接受 ``{"books": [...]}`` 或裸数组 ``[...]``；每项按 YuqueBook 字段过滤未知键。
+    """
+    p = Path(path)
+    if not p.exists():
+        logger.warning("yuque books 配置不存在：%s（返回空列表）", p)
+        return []
+    data = json.loads(p.read_text(encoding="utf-8"))
+    items = data.get("books", []) if isinstance(data, dict) else data
+    allowed = {f.name for f in fields(YuqueBook)}
+    books = []
+    for item in items:
+        kw = {k: v for k, v in item.items() if k in allowed}
+        kw["book_id"] = str(kw.get("book_id", ""))  # 统一 str
+        books.append(YuqueBook(**kw))
+    return books
 
 
 class YuqueConnector(SourceConnector):
@@ -89,6 +114,19 @@ class YuqueConnector(SourceConnector):
         self.api_base = api_base.rstrip("/")
         self.page_size = page_size
         self.session = session or requests.Session()
+
+    @classmethod
+    def from_settings(cls, settings: Settings | None = None) -> YuqueConnector:
+        """从 Settings 装配：token/cookie/url_template 出自 settings，books 从 JSON 读。"""
+        from rag_core.settings import get_settings
+
+        s = settings or get_settings()
+        return cls(
+            books=load_books(s.yuque.books_config),
+            token=s.yuque.token.get_secret_value(),
+            cookie=s.yuque.cookie.get_secret_value(),
+            url_template=s.yuque.url_template,
+        )
 
     # ---------- helpers ----------
 

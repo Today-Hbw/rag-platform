@@ -1,0 +1,11 @@
+{
+  "books": [
+    {
+      "book_id": "123456",
+      "book_slug": "handbook",
+      "namespace": "teamx",
+      "title": "员工手册",
+      "token": ""
+    }
+  ]
+}

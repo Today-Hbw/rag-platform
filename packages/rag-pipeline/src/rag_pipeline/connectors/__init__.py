@@ -18,6 +18,11 @@ from rag_pipeline.connectors.base import (
     detect_changes,
     normalize_version,
 )
+from rag_pipeline.connectors.registry import (
+    available_connectors,
+    get_connector,
+    register_connector,
+)
 
 __all__ = [
     "AssetAuth",
@@ -29,4 +34,7 @@ __all__ = [
     "SourceScope",
     "detect_changes",
     "normalize_version",
+    "available_connectors",
+    "get_connector",
+    "register_connector",
 ]

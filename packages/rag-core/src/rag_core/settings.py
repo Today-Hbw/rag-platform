@@ -64,6 +64,10 @@ class QdrantSettings(BaseModel):
 class YuqueSettings(BaseModel):
     token: SecretStr = SecretStr("")
     cookie: SecretStr = SecretStr("")
+    # books 列表（非密钥：book_id/book_slug/namespace/title/token）JSON 配置路径。
+    books_config: str = "config/connectors/yuque.json"
+    # source_url 模板；部署侧按真实语雀空间覆盖以与旧产出对齐（见阶段4第5步等价对拍）。
+    url_template: str = "https://www.yuque.com/{namespace}/{collection_slug}/{doc_key}"
 
 
 class SearchSettings(BaseModel):

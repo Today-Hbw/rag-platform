@@ -43,6 +43,8 @@ class DownloadStats:
     deleted: int = 0
     images: int = 0
     attachments: int = 0
+    planned_fetch: int = 0  # dry-run：将抓取篇数
+    planned_delete: int = 0  # dry-run：将删除篇数
     failures: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -221,8 +223,12 @@ def sync_scope(
     *,
     settings: Settings | None = None,
     full: bool = False,
+    dry_run: bool = False,
 ) -> DownloadStats:
-    """同步单个 scope。``full=True`` 忽略增量、全量重下（删除差集仍照常处理）。"""
+    """同步单个 scope。``full=True`` 忽略增量、全量重下（删除差集仍照常处理）。
+
+    ``dry_run=True`` 只列举 + 算差集，报告将抓/将删篇数，不写盘不改 DB。
+    """
     stats = DownloadStats(scope_id=scope.scope_id)
 
     refs = connector.list_docs(scope)  # 列举失败会抛出 → 整个 scope 中止，不做删除
@@ -234,6 +240,15 @@ def sync_scope(
 
     to_process = refs if full else changes.to_fetch
     stats.skipped = 0 if full else len(changes.unchanged)
+
+    if dry_run:
+        stats.planned_fetch = len(to_process)
+        stats.planned_delete = len(changes.deleted)
+        logger.info(
+            "[%s] dry-run：将抓取 %d，跳过 %d，将删除 %d",
+            scope.scope_id, stats.planned_fetch, stats.skipped, stats.planned_delete,
+        )
+        return stats
 
     for ref in to_process:
         try:
@@ -262,13 +277,24 @@ def sync(
     *,
     settings: Settings | None = None,
     full: bool = False,
+    dry_run: bool = False,
+    scope_ids: list[str] | None = None,
 ) -> list[DownloadStats]:
-    """同步 connector 的所有 scope，单个 scope 失败不影响其它。"""
+    """同步 connector 的所有 scope，单个 scope 失败不影响其它。
+
+    ``scope_ids`` 非空时只同步匹配的 scope（对应 CLI ``--scope``）。
+    """
+    wanted = set(scope_ids) if scope_ids else None
     results: list[DownloadStats] = []
     for scope in connector.scopes():
+        if wanted is not None and scope.scope_id not in wanted:
+            continue
         try:
             results.append(
-                sync_scope(conn, connector, scope, workspace, settings=settings, full=full)
+                sync_scope(
+                    conn, connector, scope, workspace,
+                    settings=settings, full=full, dry_run=dry_run,
+                )
             )
         except Exception as e:  # noqa: BLE001 - scope 级列举失败隔离
             logger.error("scope %s failed: %s", scope.scope_id, e)
