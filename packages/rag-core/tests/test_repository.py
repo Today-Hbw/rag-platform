@@ -107,6 +107,22 @@ def test_mark_docs_deleted_empty_is_noop():
     assert conn.commits == 0
 
 
+def test_get_role_resource_ids_queries_and_coerces_int():
+    conn = FakeConn([[{"resource_id": "*"}, {"resource_id": "book:42"}]])
+    out = repo.get_role_resource_ids(conn, ["12", "34", "bad"])  # 'bad' 非 int 被丢
+    assert out == ["*", "book:42"]
+    sql, params = conn.cur.calls[0]
+    assert "system_role_permission" in sql and "resource_id" in sql
+    assert params == ("rag_doc_meta", 12, 34)  # 表名 + 转 int 的 role_ids
+
+
+def test_get_role_resource_ids_empty_roles_no_query():
+    conn = FakeConn()
+    assert repo.get_role_resource_ids(conn, []) == []
+    assert repo.get_role_resource_ids(conn, ["x"]) == []  # 全非 int
+    assert conn.cur.calls == []
+
+
 def test_save_resources_deletes_then_inserts_with_mapping():
     conn = FakeConn()
     resources = [{"index": 2, "url": "u", "local_path": "p.png", "mime": "image/png"}]

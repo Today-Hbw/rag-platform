@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from rag_core.contracts import ChunkPayload, DocFacets
 from rag_core.settings import Settings
+from rag_search import auth
 from rag_search.app import SearchService, create_app
 from rag_search.cache import SearchCache
 
@@ -17,8 +18,10 @@ class FakeEmbedder:
 class FakeStore:
     def __init__(self, hits):
         self._hits = hits
+        self.last_filter = "unset"
 
     def search(self, query_vec, *, limit=50, query_filter=None):
+        self.last_filter = query_filter
         return list(self._hits)
 
 
@@ -31,17 +34,23 @@ def _hit(doc_id, title, text, score):
     return {"id": f"p{doc_id}", "score": score, "payload": payload}
 
 
-def _client(hits, tmp_path):
+def _client(hits, tmp_path, *, rbac=False, service_token=""):
     settings = Settings()
     settings.paths.data_root = str(tmp_path)
+    settings.rbac.enabled = rbac
+    if service_token:
+        from pydantic import SecretStr
+
+        settings.rbac.service_token = SecretStr(service_token)
+    store = FakeStore(hits)
     svc = SearchService(
         settings=settings,
         embedder=FakeEmbedder(),
-        store=FakeStore(hits),
+        store=store,
         cache=SearchCache(fakeredis.FakeStrictRedis(decode_responses=True), settings),
         conn_factory=lambda: None,
     )
-    return TestClient(create_app(svc)), svc
+    return TestClient(create_app(svc)), store
 
 
 def test_health(tmp_path):
@@ -99,3 +108,70 @@ def test_query_log_written(tmp_path):
     client.post("/search", json={"query": "正文"})
     logs = list((tmp_path / "logs").glob("*.jsonl"))
     assert logs and logs[0].read_text(encoding="utf-8").strip()
+
+
+# ---------- 服务令牌 ----------
+
+def test_service_token_missing_rejected(tmp_path):
+    client, _ = _client([_hit(1, "t", "x", 0.9)], tmp_path, service_token="SEKRET")
+    resp = client.post("/search", json={"query": "x"})  # 无 Authorization
+    assert resp.status_code == 401
+
+
+def test_service_token_wrong_rejected(tmp_path):
+    client, _ = _client([_hit(1, "t", "x", 0.9)], tmp_path, service_token="SEKRET")
+    resp = client.post(
+        "/search", json={"query": "x"}, headers={"Authorization": "Bearer WRONG"}
+    )
+    assert resp.status_code == 401
+
+
+def test_service_token_correct_passes(tmp_path):
+    client, _ = _client([_hit(1, "t", "x", 0.9)], tmp_path, service_token="SEKRET")
+    resp = client.post(
+        "/search", json={"query": "x"}, headers={"Authorization": "Bearer SEKRET"}
+    )
+    assert resp.status_code == 200
+
+
+def test_no_token_configured_allows_all(tmp_path):
+    # 未配置令牌 → 不校验(兼容现状)
+    client, _ = _client([_hit(1, "t", "x", 0.9)], tmp_path)
+    assert client.post("/search", json={"query": "x"}).status_code == 200
+
+
+# ---------- RBAC 过滤 ----------
+
+def test_rbac_denies_all_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(auth.repository, "get_role_resource_ids", lambda conn, rids: [])
+    client, store = _client([_hit(1, "t", "x", 0.9)], tmp_path, rbac=True)
+    body = client.post("/search", json={"query": "x"}, headers={"X-Role-Ids": "99"}).json()
+    assert body["total_results"] == 0  # 无授权 → 空
+    assert store.last_filter == "unset"  # 短路，未查向量库
+
+
+def test_rbac_allow_all_no_filter(tmp_path, monkeypatch):
+    monkeypatch.setattr(auth.repository, "get_role_resource_ids", lambda conn, rids: ["*"])
+    client, store = _client([_hit(1, "t", "x", 0.9)], tmp_path, rbac=True)
+    body = client.post("/search", json={"query": "x"}, headers={"X-Role-Ids": "1"}).json()
+    assert body["total_results"] == 1
+    assert store.last_filter is None  # 超管不加 filter
+
+
+def test_rbac_scoped_passes_filter(tmp_path, monkeypatch):
+    monkeypatch.setattr(auth.repository, "get_role_resource_ids", lambda conn, rids: ["book:42"])
+    client, store = _client([_hit(1, "t", "x", 0.9)], tmp_path, rbac=True)
+    client.post("/search", json={"query": "x"}, headers={"X-Role-Ids": "7"})
+    assert store.last_filter is not None  # 传了 Qdrant filter
+    assert store.last_filter.should[0].key == "collection_id"
+
+
+def test_rbac_cache_isolated_by_roles(tmp_path, monkeypatch):
+    monkeypatch.setattr(auth.repository, "get_role_resource_ids", lambda conn, rids: ["*"])
+    client, _ = _client([_hit(1, "t", "x", 0.9)], tmp_path, rbac=True)
+    a1 = client.post("/search", json={"query": "x"}, headers={"X-Role-Ids": "1"}).json()
+    a2 = client.post("/search", json={"query": "x"}, headers={"X-Role-Ids": "1"}).json()
+    b1 = client.post("/search", json={"query": "x"}, headers={"X-Role-Ids": "2"}).json()
+    assert a1["from_cache"] is False
+    assert a2["from_cache"] is True   # 同角色 → 命中
+    assert b1["from_cache"] is False  # 不同角色 → 独立缓存，不串权限

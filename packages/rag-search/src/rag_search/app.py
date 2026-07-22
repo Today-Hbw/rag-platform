@@ -12,18 +12,20 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from rag_core.db import get_connection
 from rag_core.embedding import EmbeddingClient
 from rag_core.settings import Settings, get_settings
 from rag_core.vectorstore import VectorStore
+from rag_search import auth
 from rag_search import retrieve as retrieve_mod
 from rag_search.cache import SearchCache, make_cache_key
 
@@ -99,17 +101,6 @@ class MultimodalSearchRequest(BaseModel):
     refresh: bool = Field(default=False)
 
 
-def _resolve_query_filter(settings: Settings) -> Any | None:
-    """RBAC 过滤挂载点。rbac.enabled=false → None（旧行为，全量可见）。
-
-    阶段 5 在此接：extract_identity(header) → resolve_scope → build_qdrant_filter。
-    """
-    if not settings.rbac.enabled:
-        return None
-    logger.warning("rbac.enabled=true 但过滤尚未实现（阶段 5），暂返回 None")
-    return None
-
-
 def _to_item(rank: int, r: dict[str, Any]) -> ResultItem:
     return ResultItem(
         rank=rank,
@@ -160,10 +151,15 @@ class SearchService:
         image_url: str | None = None,
         top_k: int = 10,
         refresh: bool = False,
+        role_ids: list[str] | None = None,
     ) -> SearchResponse:
         t0 = time.time()
+        rbac_on = self.settings.rbac.enabled
+        role_ids = role_ids or []
+        # 缓存 key 叠权限签名(仅依赖 role_ids,不需 DB) → 缓存命中仍快且不串权限
+        sig = auth.scope_sig(role_ids) if rbac_on else ""
         cache_key = make_cache_key(
-            query_text, image_b64=image_b64, image_url=image_url, top_k=top_k
+            query_text, image_b64=image_b64, image_url=image_url, top_k=top_k, scope_sig=sig
         )
         if not refresh:
             cached = self.cache.get(cache_key)
@@ -177,6 +173,12 @@ class SearchService:
         )
         conn = self._conn_factory()
         try:
+            query_filter = None
+            if rbac_on:
+                scope = auth.resolve_scope(conn, role_ids)
+                if scope.denies_all:
+                    return self._respond(query_text, [], t0, cache_key)  # 无授权 → 空
+                query_filter = auth.build_query_filter(scope)
             results = retrieve_mod.retrieve(
                 query_vec,
                 store=self.store,
@@ -184,16 +186,18 @@ class SearchService:
                 query_text=query_text,
                 top_k=top_k,
                 settings=self.settings,
-                query_filter=_resolve_query_filter(self.settings),
+                query_filter=query_filter,
             )
         finally:
             _close(conn)
 
+        return self._respond(query_text, results, t0, cache_key)
+
+    def _respond(self, query_text, results, t0, cache_key) -> SearchResponse:
         items = [_to_item(i + 1, r) for i, r in enumerate(results)]
         elapsed = int((time.time() - t0) * 1000)
         top_title = items[0].doc_title if items else ""
         self._log_query(query_text or "(image)", len(items), top_title, elapsed)
-
         response = SearchResponse(
             query=query_text or "(image)",
             total_results=len(items),
@@ -236,26 +240,43 @@ def create_app(service: SearchService | None = None) -> FastAPI:
             _svc = SearchService()
         return _svc
 
+    def require_service_token(authorization: str | None = Header(default=None)):
+        """校验调用方是业务系统(共享服务令牌)。未配置令牌=不校验(兼容现状)。"""
+        expected = svc().settings.rbac.service_token.get_secret_value()
+        if not expected:
+            return
+        token = ""
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization[len("Bearer "):]
+        if not secrets.compare_digest(token, expected):
+            raise HTTPException(status_code=401, detail="invalid service token")
+
+    guard = [Depends(require_service_token)]
+
     @app.get("/health")
     def health():
         return {"status": "ok"}
 
-    @app.post("/search", response_model=SearchResponse)
-    def search(req: SearchRequest):
+    @app.post("/search", response_model=SearchResponse, dependencies=guard)
+    def search(req: SearchRequest, x_role_ids: str | None = Header(default=None)):
         try:
-            return svc().run(query_text=req.query, top_k=req.top_k, refresh=req.refresh)
+            return svc().run(
+                query_text=req.query, top_k=req.top_k, refresh=req.refresh,
+                role_ids=auth.parse_role_ids(x_role_ids),
+            )
         except Exception as e:
             logger.exception("search failed")
             raise HTTPException(status_code=500, detail=str(e)) from e
 
-    @app.post("/image", response_model=SearchResponse)
-    def search_image(req: ImageSearchRequest):
+    @app.post("/image", response_model=SearchResponse, dependencies=guard)
+    def search_image(req: ImageSearchRequest, x_role_ids: str | None = Header(default=None)):
         if not req.image_base64 and not req.image_url:
             raise HTTPException(status_code=400, detail="需要 image_base64 或 image_url")
         try:
             return svc().run(
                 query_text="(image)", image_b64=req.image_base64,
                 image_url=req.image_url, top_k=req.top_k, refresh=req.refresh,
+                role_ids=auth.parse_role_ids(x_role_ids),
             )
         except HTTPException:
             raise
@@ -263,14 +284,17 @@ def create_app(service: SearchService | None = None) -> FastAPI:
             logger.exception("image search failed")
             raise HTTPException(status_code=500, detail=str(e)) from e
 
-    @app.post("/multimodal", response_model=SearchResponse)
-    def search_multimodal(req: MultimodalSearchRequest):
+    @app.post("/multimodal", response_model=SearchResponse, dependencies=guard)
+    def search_multimodal(
+        req: MultimodalSearchRequest, x_role_ids: str | None = Header(default=None)
+    ):
         if not req.query and not req.image_base64 and not req.image_url:
             raise HTTPException(status_code=400, detail="至少需要 query 或图片")
         try:
             return svc().run(
                 query_text=req.query or "", image_b64=req.image_base64,
                 image_url=req.image_url, top_k=req.top_k, refresh=req.refresh,
+                role_ids=auth.parse_role_ids(x_role_ids),
             )
         except HTTPException:
             raise

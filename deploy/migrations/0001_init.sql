@@ -89,3 +89,10 @@ CREATE TABLE IF NOT EXISTS system_role_permission (
     INDEX idx_role (role_id),
     INDEX idx_resource (resource_table, resource_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='角色资源权限';
+
+
+
+
+-- 业务系统关联表
+-- system_user
+-- system_user_role

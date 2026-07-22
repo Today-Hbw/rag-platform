@@ -94,8 +94,12 @@ class PathSettings(BaseModel):
 
 
 class RbacSettings(BaseModel):
+    # 按 role_ids 过滤检索结果的总开关；false=旧行为(全量可见)。
     enabled: bool = False
-    identity_header: str = "X-User-Id"
+    # 携带用户角色的请求头(业务系统置);检索时读它解析可见范围。
+    roles_header: str = "X-Role-Ids"
+    # 业务系统↔RAG 的共享服务令牌(证明调用方是业务系统)；空=不校验(兼容现状)。
+    service_token: SecretStr = SecretStr("")
 
 
 class ExtractSettings(BaseModel):

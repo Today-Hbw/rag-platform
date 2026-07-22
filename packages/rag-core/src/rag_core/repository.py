@@ -15,6 +15,8 @@ __all__ = [
     "TABLE_DOC_META",
     "TABLE_RESOURCE",
     "TABLE_CHUNK",
+    "TABLE_ROLE_PERM",
+    "get_role_resource_ids",
     "get_doc_meta",
     "get_scope_versions",
     "upsert_doc_meta",
@@ -38,6 +40,37 @@ __all__ = [
 TABLE_DOC_META = "rag_doc_meta"
 TABLE_RESOURCE = "rag_resource"
 TABLE_CHUNK = "rag_chunk_record"
+TABLE_ROLE_PERM = "system_role_permission"
+
+
+# ==================== 权限（RBAC） ====================
+
+def get_role_resource_ids(
+    conn, role_ids: list, resource_table: str = TABLE_DOC_META
+) -> list[str]:
+    """查这批角色被授权的 resource_id（``book:<collection_id>`` / ``doc:<doc_id>`` / ``*``）。
+
+    role_id 非 int 的忽略。空角色返回 []（由上层判为无权限）。仅取 view 及以上，
+    这里不区分权限级别（检索只关心"能否看到"）。
+    """
+    ids = []
+    for r in role_ids:
+        try:
+            ids.append(int(r))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return []
+    placeholders = ",".join(["%s"] * len(ids))
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT DISTINCT resource_id FROM {TABLE_ROLE_PERM}
+            WHERE resource_table = %s AND role_id IN ({placeholders})
+            """,
+            (resource_table, *ids),
+        )
+        return [row["resource_id"] for row in cursor.fetchall()]
 
 
 # ==================== doc_meta ====================
