@@ -60,6 +60,30 @@ def test_client_search_calls_endpoint():
         assert b'"top_k":5' in sent.content or b'"top_k": 5' in sent.content
 
 
+def test_client_sends_auth_headers_when_token_set():
+    with respx.mock:
+        route = respx.post("http://svc/search").mock(
+            return_value=httpx.Response(200, json={"total_results": 0, "results": []})
+        )
+        c = RemoteSearchClient("http://svc", token="user-tok", service_token="svc-tok")
+        asyncio.run(c.search("q"))
+        req = route.calls[0].request
+        assert req.headers["authorization"] == "Bearer user-tok"
+        assert req.headers["x-service-token"] == "svc-tok"
+
+
+def test_client_no_auth_headers_when_no_token():
+    with respx.mock:
+        route = respx.post("http://svc/search").mock(
+            return_value=httpx.Response(200, json={"total_results": 0, "results": []})
+        )
+        c = RemoteSearchClient("http://svc")
+        asyncio.run(c.search("q"))
+        req = route.calls[0].request
+        assert "authorization" not in req.headers  # 无 token → 不带鉴权头
+        assert "x-service-token" not in req.headers
+
+
 def test_client_health_true_false():
     with respx.mock:
         respx.get("http://svc/health").mock(return_value=httpx.Response(200))

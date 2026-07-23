@@ -25,18 +25,62 @@ def test_parse_timeout_and_verbose():
 
 
 def test_timeout_passed_to_client(monkeypatch):
-    """--timeout 真正传到 RemoteSearchClient（回归旧死参数 bug）。"""
+    """--timeout / token 真正传到 RemoteSearchClient（回归旧死参数 bug）。"""
     captured = {}
 
-    class FakeClient:
-        def __init__(self, url, timeout=DEFAULT_TIMEOUT):
-            captured["url"] = url
-            captured["timeout"] = timeout
-
-    async def fake_run(server_url, timeout):
-        # 复刻 _run 内部装配，验证 timeout 落到 client
-        FakeClient(server_url, timeout=timeout)
+    async def fake_run(server_url, timeout, *, token=None, service_token=None):
+        captured.update(
+            server_url=server_url, timeout=timeout,
+            token=token, service_token=service_token,
+        )
 
     monkeypatch.setattr(cli, "_run", fake_run)
+    monkeypatch.setenv("RAG_MCP_TOKEN", "tok-abc")
+    monkeypatch.setenv("RAG_MCP_SERVICE_TOKEN", "svc-xyz")
     rc = cli.main(["-s", "http://svc", "--timeout", "7"])
     assert rc == 0
+    assert captured == {
+        "server_url": "http://svc", "timeout": 7,
+        "token": "tok-abc", "service_token": "svc-xyz",
+    }
+
+
+def test_cli_flag_token_overrides_env(monkeypatch):
+    captured = {}
+
+    async def fake_run(server_url, timeout, *, token=None, service_token=None):
+        captured["token"] = token
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+    monkeypatch.setenv("RAG_MCP_TOKEN", "from-env")
+    cli.main(["-s", "http://svc", "--token", "from-flag"])
+    assert captured["token"] == "from-flag"  # 显式 flag 优先于环境变量
+
+
+def test_login_requires_url(monkeypatch):
+    monkeypatch.delenv("RAG_MCP_LOGIN_URL", raising=False)
+    assert cli.main(["login", "--phone", "138", "--code", "1234"]) == 2  # 缺 login-url
+
+
+def test_login_saves_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("RAG_MCP_TOKEN_FILE", str(tmp_path / "token.json"))
+    monkeypatch.setattr(
+        cli.token_store, "login",
+        lambda url, phone, code, timeout=10.0: {"token": "logged-in-tok"},
+    )
+    rc = cli.main([
+        "login", "--login-url", "http://biz/login", "--phone", "138", "--code", "1234",
+    ])
+    assert rc == 0
+    assert cli.token_store.load_token() == "logged-in-tok"
+
+
+def test_login_missing_token_in_response(monkeypatch, tmp_path):
+    monkeypatch.setenv("RAG_MCP_TOKEN_FILE", str(tmp_path / "token.json"))
+    monkeypatch.setattr(
+        cli.token_store, "login", lambda url, phone, code, timeout=10.0: {"nope": 1}
+    )
+    rc = cli.main(
+        ["login", "--login-url", "http://biz/login", "--phone", "1", "--code", "2"]
+    )
+    assert rc == 1  # 响应无 token 字段

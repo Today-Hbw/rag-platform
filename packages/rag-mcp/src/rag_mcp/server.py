@@ -23,7 +23,13 @@ DEFAULT_TIMEOUT = 30
 
 
 class RemoteSearchClient:
-    """远程检索服务 HTTP 客户端。"""
+    """远程检索服务 HTTP 客户端。
+
+    ``token``（带外登录得到的用户 token）经 ``Authorization: Bearer`` 逐请求透传给
+    rag-search，供其做 introspection/RBAC——**它由客户端持有，不是 MCP 工具参数，
+    模型看不到**（REFACTOR_PLAN §5.2 铁律 3）。``service_token`` 经 ``X-Service-Token``
+    透传，证明调用方是可信客户端（rag-search 侧可选校验）。
+    """
 
     def __init__(
         self,
@@ -32,17 +38,30 @@ class RemoteSearchClient:
         *,
         search_path: str = "/search",
         health_path: str = "/health",
+        token: str | None = None,
+        service_token: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.search_path = search_path
         self.health_path = health_path
+        self.token = token
+        self.service_token = service_token
+
+    def _auth_headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        if self.service_token:
+            headers["X-Service-Token"] = self.service_token
+        return headers
 
     async def search(self, query: str, top_k: int = 10) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(
                 f"{self.base_url}{self.search_path}",
                 json={"query": query, "top_k": top_k},
+                headers=self._auth_headers(),
             )
             resp.raise_for_status()
             return resp.json()
