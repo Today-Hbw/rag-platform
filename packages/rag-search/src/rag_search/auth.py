@@ -163,7 +163,12 @@ def resolve_identity(
 
 
 def resolve_scope(conn, role_ids: list[str]) -> Scope:
-    """role_ids → Scope。查 system_role_permission,按 resource_id 前缀归类。"""
+    """role_ids → Scope（第②跳）。查 system_role_permission 按 resource_id 前缀归类，
+    再并入公共库（is_public）collection。
+
+    公共库人人可见：即便无角色/无 token（role_ids 为空），公共库仍并入，故此时
+    ``denies_all`` 为 False（能看到公共内容）。allow_all（超管）看全部，跳过公共库并入。
+    """
     scope = Scope()
     for rid in repository.get_role_resource_ids(conn, role_ids):
         if rid == "*":
@@ -175,6 +180,8 @@ def resolve_scope(conn, role_ids: list[str]) -> Scope:
                 scope.doc_ids.add(int(rid[len("doc:"):]))
             except ValueError:
                 continue
+    if not scope.allow_all:
+        scope.collection_ids.update(repository.get_public_collection_ids(conn))
     return scope
 
 

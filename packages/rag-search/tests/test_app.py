@@ -144,6 +144,7 @@ def test_no_token_configured_allows_all(tmp_path):
 
 def test_rbac_denies_all_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(auth.repository, "get_role_resource_ids", lambda conn, rids: [])
+    monkeypatch.setattr(auth.repository, "get_public_collection_ids", lambda conn: [])
     client, store = _client([_hit(1, "t", "x", 0.9)], tmp_path, rbac=True)
     body = client.post("/search", json={"query": "x"}, headers={"X-Role-Ids": "99"}).json()
     assert body["total_results"] == 0  # 无授权 → 空
@@ -160,10 +161,22 @@ def test_rbac_allow_all_no_filter(tmp_path, monkeypatch):
 
 def test_rbac_scoped_passes_filter(tmp_path, monkeypatch):
     monkeypatch.setattr(auth.repository, "get_role_resource_ids", lambda conn, rids: ["book:42"])
+    monkeypatch.setattr(auth.repository, "get_public_collection_ids", lambda conn: [])
     client, store = _client([_hit(1, "t", "x", 0.9)], tmp_path, rbac=True)
     client.post("/search", json={"query": "x"}, headers={"X-Role-Ids": "7"})
     assert store.last_filter is not None  # 传了 Qdrant filter
     assert store.last_filter.should[0].key == "collection_id"
+
+
+def test_rbac_public_collection_visible_without_roles(tmp_path, monkeypatch):
+    # 无角色，但有公共库 → 不空，过滤锚定公共库 collection
+    monkeypatch.setattr(auth.repository, "get_role_resource_ids", lambda conn, rids: [])
+    monkeypatch.setattr(auth.repository, "get_public_collection_ids", lambda conn: ["42"])
+    client, store = _client([_hit(1, "t", "x", 0.9)], tmp_path, rbac=True)
+    body = client.post("/search", json={"query": "x"}).json()  # 无 X-Role-Ids
+    assert body["total_results"] == 1  # 公共库人人可见
+    assert store.last_filter.should[0].key == "collection_id"
+    assert store.last_filter.should[0].match.any == ["42"]
 
 
 def test_rbac_online_introspection_uses_bearer_token(tmp_path, monkeypatch):
@@ -177,6 +190,7 @@ def test_rbac_online_introspection_uses_bearer_token(tmp_path, monkeypatch):
 
     monkeypatch.setattr(auth, "introspect", fake_introspect)
     monkeypatch.setattr(auth.repository, "get_role_resource_ids", lambda conn, rids: ["book:42"])
+    monkeypatch.setattr(auth.repository, "get_public_collection_ids", lambda conn: [])
 
     settings = Settings()
     settings.paths.data_root = str(tmp_path)

@@ -123,6 +123,14 @@ def test_get_role_resource_ids_empty_roles_no_query():
     assert conn.cur.calls == []
 
 
+def test_get_public_collection_ids_filters_is_public():
+    conn = FakeConn([[{"collection_id": "9"}, {"collection_id": "10"}]])
+    out = repo.get_public_collection_ids(conn)
+    assert out == ["9", "10"]
+    sql = conn.cur.calls[0][0]
+    assert "rag_collection" in sql and "is_public = 1" in sql
+
+
 def test_save_resources_deletes_then_inserts_with_mapping():
     conn = FakeConn()
     resources = [{"index": 2, "url": "u", "local_path": "p.png", "mime": "image/png"}]

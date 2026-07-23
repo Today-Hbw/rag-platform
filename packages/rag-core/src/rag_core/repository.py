@@ -16,7 +16,9 @@ __all__ = [
     "TABLE_RESOURCE",
     "TABLE_CHUNK",
     "TABLE_ROLE_PERM",
+    "TABLE_COLLECTION",
     "get_role_resource_ids",
+    "get_public_collection_ids",
     "get_doc_meta",
     "get_scope_versions",
     "upsert_doc_meta",
@@ -41,9 +43,21 @@ TABLE_DOC_META = "rag_doc_meta"
 TABLE_RESOURCE = "rag_resource"
 TABLE_CHUNK = "rag_chunk_record"
 TABLE_ROLE_PERM = "system_role_permission"
+TABLE_COLLECTION = "rag_collection"
 
 
 # ==================== 权限（RBAC） ====================
+
+
+def get_public_collection_ids(conn) -> list[str]:
+    """公共库（``is_public=1``）的 collection_id 列表。
+
+    公共库人人可见（含无角色/无 token），由 resolve_scope 无条件并入可见集
+    （REFACTOR_PLAN §5.2 ③）。
+    """
+    with conn.cursor() as cursor:
+        cursor.execute(f"SELECT collection_id FROM {TABLE_COLLECTION} WHERE is_public = 1")
+        return [row["collection_id"] for row in cursor.fetchall()]
 
 def get_role_resource_ids(
     conn, role_ids: list, resource_table: str = TABLE_DOC_META
