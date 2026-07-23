@@ -151,13 +151,22 @@ class SearchService:
         image_url: str | None = None,
         top_k: int = 10,
         refresh: bool = False,
-        role_ids: list[str] | None = None,
+        user_token: str | None = None,
+        roles_header_value: str | None = None,
     ) -> SearchResponse:
         t0 = time.time()
         rbac_on = self.settings.rbac.enabled
-        role_ids = role_ids or []
-        # 缓存 key 叠权限签名(仅依赖 role_ids,不需 DB) → 缓存命中仍快且不串权限
-        sig = auth.scope_sig(role_ids) if rbac_on else ""
+        # 第①跳：token → 身份(role_ids/allow_all)。离线模式(introspect_url 空)直接信
+        # X-Role-Ids 头;在线模式调 introspection(内部按 token 缓存)。
+        identity = (
+            auth.resolve_identity(
+                self.settings.rbac, token=user_token, roles_header_value=roles_header_value
+            )
+            if rbac_on
+            else None
+        )
+        # 缓存 key 叠权限签名(依赖已解析的 role_ids/allow_all,不需 DB) → 命中仍快且不串权限
+        sig = auth.scope_sig(identity.role_ids, identity.allow_all) if identity else ""
         cache_key = make_cache_key(
             query_text, image_b64=image_b64, image_url=image_url, top_k=top_k, scope_sig=sig
         )
@@ -174,8 +183,9 @@ class SearchService:
         conn = self._conn_factory()
         try:
             query_filter = None
-            if rbac_on:
-                scope = auth.resolve_scope(conn, role_ids)
+            if rbac_on and not identity.allow_all:
+                # 第②跳：role_ids → 可见 collection/doc(查 system_role_permission)
+                scope = auth.resolve_scope(conn, identity.role_ids)
                 if scope.denies_all:
                     return self._respond(query_text, [], t0, cache_key)  # 无授权 → 空
                 query_filter = auth.build_query_filter(scope)
@@ -240,43 +250,58 @@ def create_app(service: SearchService | None = None) -> FastAPI:
             _svc = SearchService()
         return _svc
 
-    def require_service_token(authorization: str | None = Header(default=None)):
-        """校验调用方是业务系统(共享服务令牌)。未配置令牌=不校验(兼容现状)。"""
+    def require_service_token(x_service_token: str | None = Header(default=None)):
+        """校验调用方是业务系统(共享服务令牌，置于 ``X-Service-Token`` 头)。
+
+        与用户 token(``Authorization: Bearer``,供 introspection)分属两头,互不冲突。
+        未配置令牌=不校验(兼容现状)。
+        """
         expected = svc().settings.rbac.service_token.get_secret_value()
         if not expected:
             return
-        token = ""
-        if authorization and authorization.startswith("Bearer "):
-            token = authorization[len("Bearer "):]
-        if not secrets.compare_digest(token, expected):
+        if not secrets.compare_digest(x_service_token or "", expected):
             raise HTTPException(status_code=401, detail="invalid service token")
 
     guard = [Depends(require_service_token)]
+
+    def _bearer(authorization: str | None) -> str | None:
+        """从 ``Authorization: Bearer <token>`` 取用户 token(供 introspection)。"""
+        if authorization and authorization.startswith("Bearer "):
+            return authorization[len("Bearer "):]
+        return None
 
     @app.get("/health")
     def health():
         return {"status": "ok"}
 
     @app.post("/search", response_model=SearchResponse, dependencies=guard)
-    def search(req: SearchRequest, x_role_ids: str | None = Header(default=None)):
+    def search(
+        req: SearchRequest,
+        x_role_ids: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
+    ):
         try:
             return svc().run(
                 query_text=req.query, top_k=req.top_k, refresh=req.refresh,
-                role_ids=auth.parse_role_ids(x_role_ids),
+                user_token=_bearer(authorization), roles_header_value=x_role_ids,
             )
         except Exception as e:
             logger.exception("search failed")
             raise HTTPException(status_code=500, detail=str(e)) from e
 
     @app.post("/image", response_model=SearchResponse, dependencies=guard)
-    def search_image(req: ImageSearchRequest, x_role_ids: str | None = Header(default=None)):
+    def search_image(
+        req: ImageSearchRequest,
+        x_role_ids: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
+    ):
         if not req.image_base64 and not req.image_url:
             raise HTTPException(status_code=400, detail="需要 image_base64 或 image_url")
         try:
             return svc().run(
                 query_text="(image)", image_b64=req.image_base64,
                 image_url=req.image_url, top_k=req.top_k, refresh=req.refresh,
-                role_ids=auth.parse_role_ids(x_role_ids),
+                user_token=_bearer(authorization), roles_header_value=x_role_ids,
             )
         except HTTPException:
             raise
@@ -286,7 +311,9 @@ def create_app(service: SearchService | None = None) -> FastAPI:
 
     @app.post("/multimodal", response_model=SearchResponse, dependencies=guard)
     def search_multimodal(
-        req: MultimodalSearchRequest, x_role_ids: str | None = Header(default=None)
+        req: MultimodalSearchRequest,
+        x_role_ids: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ):
         if not req.query and not req.image_base64 and not req.image_url:
             raise HTTPException(status_code=400, detail="至少需要 query 或图片")
@@ -294,7 +321,7 @@ def create_app(service: SearchService | None = None) -> FastAPI:
             return svc().run(
                 query_text=req.query or "", image_b64=req.image_base64,
                 image_url=req.image_url, top_k=req.top_k, refresh=req.refresh,
-                role_ids=auth.parse_role_ids(x_role_ids),
+                user_token=_bearer(authorization), roles_header_value=x_role_ids,
             )
         except HTTPException:
             raise

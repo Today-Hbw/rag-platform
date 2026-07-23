@@ -114,14 +114,14 @@ def test_query_log_written(tmp_path):
 
 def test_service_token_missing_rejected(tmp_path):
     client, _ = _client([_hit(1, "t", "x", 0.9)], tmp_path, service_token="SEKRET")
-    resp = client.post("/search", json={"query": "x"})  # 无 Authorization
+    resp = client.post("/search", json={"query": "x"})  # 无 X-Service-Token
     assert resp.status_code == 401
 
 
 def test_service_token_wrong_rejected(tmp_path):
     client, _ = _client([_hit(1, "t", "x", 0.9)], tmp_path, service_token="SEKRET")
     resp = client.post(
-        "/search", json={"query": "x"}, headers={"Authorization": "Bearer WRONG"}
+        "/search", json={"query": "x"}, headers={"X-Service-Token": "WRONG"}
     )
     assert resp.status_code == 401
 
@@ -129,7 +129,7 @@ def test_service_token_wrong_rejected(tmp_path):
 def test_service_token_correct_passes(tmp_path):
     client, _ = _client([_hit(1, "t", "x", 0.9)], tmp_path, service_token="SEKRET")
     resp = client.post(
-        "/search", json={"query": "x"}, headers={"Authorization": "Bearer SEKRET"}
+        "/search", json={"query": "x"}, headers={"X-Service-Token": "SEKRET"}
     )
     assert resp.status_code == 200
 
@@ -164,6 +164,38 @@ def test_rbac_scoped_passes_filter(tmp_path, monkeypatch):
     client.post("/search", json={"query": "x"}, headers={"X-Role-Ids": "7"})
     assert store.last_filter is not None  # 传了 Qdrant filter
     assert store.last_filter.should[0].key == "collection_id"
+
+
+def test_rbac_online_introspection_uses_bearer_token(tmp_path, monkeypatch):
+    # 在线模式：introspect_url 有值 → 用 Authorization 里的用户 token 换 role_ids
+    auth._identity_cache.clear()
+    seen = {}
+
+    def fake_introspect(cfg, token, *, session=None):
+        seen["token"] = token
+        return auth.Identity(valid=True, role_ids=["42"], allow_all=False)
+
+    monkeypatch.setattr(auth, "introspect", fake_introspect)
+    monkeypatch.setattr(auth.repository, "get_role_resource_ids", lambda conn, rids: ["book:42"])
+
+    settings = Settings()
+    settings.paths.data_root = str(tmp_path)
+    settings.rbac.enabled = True
+    settings.rbac.introspect_url = "http://biz/introspect"
+    store = FakeStore([_hit(1, "t", "x", 0.9)])
+    svc = SearchService(
+        settings=settings, embedder=FakeEmbedder(), store=store,
+        cache=SearchCache(fakeredis.FakeStrictRedis(decode_responses=True), settings),
+        conn_factory=lambda: None,
+    )
+    client = TestClient(create_app(svc))
+    resp = client.post(
+        "/search", json={"query": "x"}, headers={"Authorization": "Bearer user-tok-1"}
+    )
+    assert resp.status_code == 200
+    assert seen["token"] == "user-tok-1"  # Authorization 被当作用户 token 送入 introspection
+    assert store.last_filter is not None and store.last_filter.should[0].key == "collection_id"
+    auth._identity_cache.clear()
 
 
 def test_rbac_cache_isolated_by_roles(tmp_path, monkeypatch):

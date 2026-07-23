@@ -1,5 +1,8 @@
-"""auth.py 单测：role_ids 解析 / scope 归类 / Qdrant filter / 缓存签名。"""
+"""auth.py 单测：role_ids 解析 / scope 归类 / Qdrant filter / 缓存签名 / introspection。"""
 
+import pytest
+
+from rag_core.settings import RbacSettings
 from rag_search import auth
 
 
@@ -62,3 +65,130 @@ def test_scope_sig_stable_and_order_independent():
     assert auth.scope_sig(["34", "12"]) == auth.scope_sig(["12", "34", "12"])
     assert auth.scope_sig(["12"]) != auth.scope_sig(["34"])
     assert auth.scope_sig([]) == "roles:"
+
+
+def test_scope_sig_allow_all_is_distinct():
+    # 超管全量、无过滤 → 独占一档，不与任何受限角色串缓存
+    assert auth.scope_sig([], allow_all=True) == "roles:__all__"
+    assert auth.scope_sig(["1"], allow_all=True) == "roles:__all__"
+    assert auth.scope_sig(["1"], allow_all=True) != auth.scope_sig(["1"])
+
+
+# ==================== introspection（增量①）====================
+
+
+class _FakeResp:
+    def __init__(self, status_code, payload=None, raise_json=False):
+        self.status_code = status_code
+        self._payload = payload
+        self._raise_json = raise_json
+
+    def json(self):
+        if self._raise_json:
+            raise ValueError("not json")
+        return self._payload
+
+
+class _FakeSession:
+    """记录调用并返回预置响应；post 抛异常可模拟网络故障。"""
+
+    def __init__(self, resp=None, boom=False):
+        self._resp = resp
+        self._boom = boom
+        self.calls = []
+
+    def post(self, url, headers=None, timeout=None):
+        self.calls.append({"url": url, "headers": headers, "timeout": timeout})
+        if self._boom:
+            raise ConnectionError("network down")
+        return self._resp
+
+
+@pytest.fixture(autouse=True)
+def _clear_identity_cache():
+    auth._identity_cache.clear()
+    yield
+    auth._identity_cache.clear()
+
+
+def test_resolve_identity_offline_reads_role_header():
+    # introspect_url 空 → 离线模式：直接信 X-Role-Ids，不发网络请求
+    cfg = RbacSettings()
+    ident = auth.resolve_identity(cfg, token="ignored", roles_header_value="12, 34")
+    assert ident.valid is True
+    assert ident.role_ids == ["12", "34"]
+    assert ident.allow_all is False
+
+
+def test_resolve_identity_offline_falls_back_to_defaults():
+    cfg = RbacSettings(default_role_ids=["7", "8"])
+    ident = auth.resolve_identity(cfg, roles_header_value=None)
+    assert ident.role_ids == ["7", "8"]  # 头缺失 → 静态默认兜底
+
+
+def test_resolve_identity_online_no_token_is_invalid():
+    cfg = RbacSettings(introspect_url="http://biz/introspect")
+    ident = auth.resolve_identity(cfg, token=None, roles_header_value="12")
+    assert ident.valid is False  # 在线模式无 token → fail-closed（X-Role-Ids 不再被信任）
+
+
+def test_resolve_identity_online_calls_and_caches():
+    cfg = RbacSettings(introspect_url="http://biz/introspect", scope_cache_ttl=300)
+    sess = _FakeSession(_FakeResp(200, {"valid": True, "role_ids": [12, 34], "allow_all": False}))
+    a = auth.resolve_identity(cfg, token="tok-1", session=sess)
+    assert a.valid and a.role_ids == ["12", "34"]  # int → str 归一
+    b = auth.resolve_identity(cfg, token="tok-1", session=sess)
+    assert b.role_ids == ["12", "34"]
+    assert len(sess.calls) == 1  # 第二次命中缓存，不再请求
+    assert sess.calls[0]["headers"]["Authorization"] == "Bearer tok-1"
+
+
+def test_resolve_identity_online_allow_all():
+    cfg = RbacSettings(introspect_url="http://biz/introspect")
+    sess = _FakeSession(_FakeResp(200, {"valid": True, "role_ids": [], "allow_all": True}))
+    ident = auth.resolve_identity(cfg, token="boss", session=sess)
+    assert ident.allow_all is True
+
+
+def test_introspect_sends_service_token_header():
+    from pydantic import SecretStr
+
+    cfg = RbacSettings(
+        introspect_url="http://biz/introspect",
+        introspect_service_token=SecretStr("svc-secret"),
+    )
+    sess = _FakeSession(_FakeResp(200, {"valid": True, "role_ids": [1]}))
+    auth.introspect(cfg, "tok", session=sess)
+    assert sess.calls[0]["headers"]["X-Service-Token"] == "svc-secret"
+
+
+def test_introspect_401_is_invalid():
+    cfg = RbacSettings(introspect_url="http://biz/introspect")
+    ident = auth.introspect(cfg, "tok", session=_FakeSession(_FakeResp(401)))
+    assert ident.valid is False
+
+
+def test_introspect_valid_false_is_invalid():
+    cfg = RbacSettings(introspect_url="http://biz/introspect")
+    sess = _FakeSession(_FakeResp(200, {"valid": False}))
+    assert auth.introspect(cfg, "tok", session=sess).valid is False
+
+
+def test_introspect_network_error_is_invalid():
+    cfg = RbacSettings(introspect_url="http://biz/introspect")
+    ident = auth.introspect(cfg, "tok", session=_FakeSession(boom=True))
+    assert ident.valid is False  # 网络故障 → fail-closed
+
+
+def test_introspect_bad_json_is_invalid():
+    cfg = RbacSettings(introspect_url="http://biz/introspect")
+    sess = _FakeSession(_FakeResp(200, raise_json=True))
+    assert auth.introspect(cfg, "tok", session=sess).valid is False
+
+
+def test_invalid_identity_not_cached():
+    cfg = RbacSettings(introspect_url="http://biz/introspect")
+    sess = _FakeSession(_FakeResp(401))
+    auth.resolve_identity(cfg, token="tok", session=sess)
+    auth.resolve_identity(cfg, token="tok", session=sess)
+    assert len(sess.calls) == 2  # 无效身份不缓存 → 每次都重试
