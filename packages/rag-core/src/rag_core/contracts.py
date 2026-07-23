@@ -79,9 +79,9 @@ class ChunkPayload:
         )
         return cls(
             source=data.get("source", ""),
-            doc_id=data.get("doc_id"),
+            doc_id=int(data.get("doc_id") or 0),
             doc_title=data.get("doc_title", ""),
-            chunk_index=data.get("chunk_index"),
+            chunk_index=int(data.get("chunk_index") or 0),
             chunk_text=data.get("chunk_text", ""),
             facets=facets,
             source_url=data.get("source_url", ""),

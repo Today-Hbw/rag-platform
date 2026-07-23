@@ -183,7 +183,7 @@ class SearchService:
         conn = self._conn_factory()
         try:
             query_filter = None
-            if rbac_on and not identity.allow_all:
+            if rbac_on and identity is not None and not identity.allow_all:
                 # 第②跳：role_ids → 可见 collection/doc(查 system_role_permission)
                 scope = auth.resolve_scope(conn, identity.role_ids)
                 if scope.denies_all:

@@ -1,4 +1,5 @@
-# CI 骨架（阶段 1）。阶段 3 再升级为 paths-filter + 分包 matrix。
+# CI（阶段 3）：paths-filter + 分包 matrix（ruff / mypy / pytest+coverage）+ gitleaks。
+# 规则：rag-core 变更触发全下游；仓根配置变更跑全部；单包变更只跑该包。
 name: CI
 
 on:
@@ -7,20 +8,95 @@ on:
   pull_request:
 
 jobs:
-  lint-test:
+  changes:
     runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.filter.outputs.core }}
+      pipeline: ${{ steps.filter.outputs.pipeline }}
+      search: ${{ steps.filter.outputs.search }}
+      mcp: ${{ steps.filter.outputs.mcp }}
+      root: ${{ steps.filter.outputs.root }}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            core:
+              - 'packages/rag-core/**'
+            pipeline:
+              - 'packages/rag-pipeline/**'
+            search:
+              - 'packages/rag-search/**'
+            mcp:
+              - 'packages/rag-mcp/**'
+            root:
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.python-version'
+              - '.github/workflows/ci.yml'
+
+  check:
+    needs: changes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: rag-core, module: rag_core }
+          - { package: rag-pipeline, module: rag_pipeline }
+          - { package: rag-search, module: rag_search }
+          - { package: rag-mcp, module: rag_mcp }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decide whether to run this package
+        id: gate
+        env:
+          CORE: ${{ needs.changes.outputs.core }}
+          ROOT: ${{ needs.changes.outputs.root }}
+          PIPELINE: ${{ needs.changes.outputs.pipeline }}
+          SEARCH: ${{ needs.changes.outputs.search }}
+          MCP: ${{ needs.changes.outputs.mcp }}
+        run: |
+          run=false
+          # core 变更触发全下游；仓根配置变更跑全部
+          if [ "$CORE" = "true" ] || [ "$ROOT" = "true" ]; then run=true; fi
+          case "${{ matrix.package }}" in
+            rag-core)     [ "$CORE" = "true" ] && run=true ;;
+            rag-pipeline) [ "$PIPELINE" = "true" ] && run=true ;;
+            rag-search)   [ "$SEARCH" = "true" ] && run=true ;;
+            rag-mcp)      [ "$MCP" = "true" ] && run=true ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+      - name: Setup uv
+        if: steps.gate.outputs.run == 'true'
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.10"
           enable-cache: true
       - name: Sync workspace
+        if: steps.gate.outputs.run == 'true'
         run: uv sync --all-extras --dev
-      - name: Lint
-        run: uv run ruff check .
-      - name: Test
-        run: uv run pytest
+      - name: Lint (ruff)
+        if: steps.gate.outputs.run == 'true'
+        run: uv run ruff check packages/${{ matrix.package }}
+      - name: Type check (mypy)
+        if: steps.gate.outputs.run == 'true'
+        run: uv run mypy packages/${{ matrix.package }}/src
+      - name: Test + coverage
+        if: steps.gate.outputs.run == 'true'
+        run: >-
+          uv run pytest packages/${{ matrix.package }}/tests
+          --cov=${{ matrix.module }}
+          --cov-report=term-missing
+          --cov-report=xml:coverage-${{ matrix.package }}.xml
+      - name: Upload coverage
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.package }}
+          path: coverage-${{ matrix.package }}.xml
+          if-no-files-found: ignore
 
   gitleaks:
     runs-on: ubuntu-latest

@@ -54,7 +54,7 @@ def _pdf_via_ocr(filepath: str, tools: ToolPaths, ex: ExtractSettings) -> str | 
             first_page=1,
             last_page=ex.ocr_max_pages,
             dpi=ex.ocr_dpi,
-            poppler_path=tools.poppler_bin,
+            poppler_path=tools.poppler_bin,  # type: ignore[arg-type]  # pdf2image 允许 None
         )
         texts = []
         for img in images:
@@ -89,7 +89,7 @@ def _extract_pdf(filepath: str, tools: ToolPaths, ex: ExtractSettings) -> str | 
     except Exception as e:
         logger.warning("PDF text extraction failed for %s: %s", filepath, e)
         return None
-    result = "\n".join(texts).strip()
+    result: str | None = "\n".join(texts).strip()
     if result:
         return result
     # pdfplumber 空（可能扫描件）→ pdftotext → OCR 兜底

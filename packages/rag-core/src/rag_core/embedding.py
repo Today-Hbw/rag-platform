@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from typing import Any
 
 import requests
 
@@ -42,7 +43,9 @@ class EmbeddingClient:
     def _post(
         self, input_items: list[dict], *, timeout: int = 60, max_retries: int = 3
     ) -> list[float]:
-        data = {"model": self._model, "input": input_items, "encoding_format": "float"}
+        data: dict[str, Any] = {
+            "model": self._model, "input": input_items, "encoding_format": "float"
+        }
         last_err: Exception | None = None
         for attempt in range(max_retries):
             try:
