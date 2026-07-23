@@ -34,7 +34,8 @@ python_version = "3.10"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["packages"]
+testpaths = ["packages", "eval"]
+pythonpath = ["."]  # 让顶层 eval/ 工具包可被 import（非 workspace 成员）
 markers = [
     "unit: 纯函数单测，无外部依赖",
     "integration: 需要外部服务（可 mock）的集成测试",

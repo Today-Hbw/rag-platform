@@ -207,7 +207,8 @@ class SearchService:
         items = [_to_item(i + 1, r) for i, r in enumerate(results)]
         elapsed = int((time.time() - t0) * 1000)
         top_title = items[0].doc_title if items else ""
-        self._log_query(query_text or "(image)", len(items), top_title, elapsed)
+        doc_ids = [r.get("doc_id") for r in results if r.get("doc_id") is not None]
+        self._log_query(query_text or "(image)", len(items), top_title, elapsed, doc_ids)
         response = SearchResponse(
             query=query_text or "(image)",
             total_results=len(items),
@@ -217,7 +218,10 @@ class SearchService:
         self.cache.set(cache_key, response.model_dump())
         return response
 
-    def _log_query(self, query: str, count: int, top_title: str, elapsed_ms: int) -> None:
+    def _log_query(
+        self, query: str, count: int, top_title: str, elapsed_ms: int,
+        doc_ids: list | None = None,
+    ) -> None:
         try:
             self.logs_dir.mkdir(parents=True, exist_ok=True)
             log_file = self.logs_dir / f"{datetime.now().strftime('%Y-%m-%d')}.jsonl"
@@ -225,6 +229,7 @@ class SearchService:
                 "timestamp": datetime.now().isoformat(),
                 "query": query, "result_count": count,
                 "top_title": top_title, "elapsed_ms": elapsed_ms,
+                "doc_ids": doc_ids or [],  # 供 eval harvest 从日志 pooling 候选
             }
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
